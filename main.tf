@@ -1,0 +1,448 @@
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+  }
+  backend "s3" {
+    bucket = "csa-gg-bucket"
+    key    = "aws-poc-infra/terraform.tfstate"
+    region = "ap-south-1"
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+  
+  # Default tags applied to all resources that support them
+  # Exceptions: IAM roles, policies, and some data sources don't support default tags
+  default_tags {
+    tags = {
+      cflt_managed_id    = "ggeorge"
+      cflt_managed_by    = "user"
+      cflt_service       = "cip-by-csa"
+      cflt_environment   = "dev"
+      cflt_keep_until    = "2025-12-31"
+    }
+  }
+}
+
+# Data sources
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_caller_identity" "current" {}
+
+# Generate private key
+resource "tls_private_key" "main" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Create AWS key pair
+resource "aws_key_pair" "main" {
+  key_name   = "${var.project_name}-${var.aws_region}-keypair"
+  public_key = tls_private_key.main.public_key_openssh
+
+  tags = {
+    Name = "${var.project_name}-keypair"
+  }
+}
+
+# VPC
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name = "${var.project_name}-vpc"
+  }
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.project_name}-igw"
+  }
+}
+
+# Public Subnet for Jumphost
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.project_name}-public-subnet"
+    "kubernetes.io/role/elb" = "1"
+  }
+}
+
+# Private Subnets
+resource "aws_subnet" "private" {
+  count = 3
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "${var.project_name}-private-subnet-${count.index + 1}"
+    "kubernetes.io/role/internal-elb" = "1"
+  }
+}
+
+# Route Table for Public Subnet
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-public-rt"
+  }
+}
+
+# Route Table Association for Public Subnet
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+# NAT Gateway
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.project_name}-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public.id
+
+  tags = {
+    Name = "${var.project_name}-nat-gateway"
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Route Table for Private Subnets
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-private-rt"
+  }
+}
+
+# Route Table Associations for Private Subnets
+resource "aws_route_table_association" "private" {
+  count = 3
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# Security Group for Jumphost
+resource "aws_security_group" "jumphost" {
+  name_prefix = "${var.project_name}-jumphost-"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-jumphost-sg"
+  }
+}
+
+# Security Group for EKS Cluster
+resource "aws_security_group" "eks_cluster" {
+  name_prefix = "${var.project_name}-eks-cluster-"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port = 443
+    to_port   = 443
+    protocol  = "tcp"
+    self      = true
+  }
+
+  # Allow API server access from EKS nodes
+  ingress {
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.eks_nodes.id]
+  }
+
+  # Allow API server access from jumphost
+  ingress {
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.jumphost.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-eks-cluster-sg"
+  }
+}
+
+# Security Group for EKS Nodes
+resource "aws_security_group" "eks_nodes" {
+  name_prefix = "${var.project_name}-eks-nodes-"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port = 0
+    to_port   = 65535
+    protocol  = "tcp"
+    self      = true
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-eks-nodes-sg"
+  }
+}
+
+# EKS Cluster IAM Role
+resource "aws_iam_role" "eks_cluster" {
+  name = "${var.project_name}-eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
+
+  tags = {
+    Name = "${var.project_name}-eks-cluster-role"
+    cflt_managed_id    = "ggeorge"
+    cflt_managed_by    = "user"
+    cflt_service       = "cip-by-csa"
+    cflt_environment   = "dev"
+    cflt_keep_until    = "2025-12-31"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.eks_cluster.name
+}
+
+# EKS Node Group IAM Role
+resource "aws_iam_role" "eks_node_group" {
+  name = "${var.project_name}-eks-node-group-role"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
+
+  tags = {
+    Name = "${var.project_name}-eks-node-group-role"
+    cflt_managed_id    = "ggeorge"
+    cflt_managed_by    = "user"
+    cflt_service       = "cip-by-csa"
+    cflt_environment   = "dev"
+    cflt_keep_until    = "2025-12-31"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cni_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_container_registry_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+# EKS Cluster
+resource "aws_eks_cluster" "main" {
+  name     = "${var.project_name}-eks"
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = var.kubernetes_version
+
+  vpc_config {
+    subnet_ids              = aws_subnet.private[*].id
+    security_group_ids      = [aws_security_group.eks_cluster.id]
+    endpoint_private_access = true
+    endpoint_public_access  = false
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+  ]
+
+  tags = {
+    Name = "${var.project_name}-eks"
+  }
+}
+
+# EKS Node Group
+resource "aws_eks_node_group" "main" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "${var.project_name}-nodes"
+  node_role_arn   = aws_iam_role.eks_node_group.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  scaling_config {
+    desired_size = var.node_group_desired_size
+    max_size     = var.node_group_max_size
+    min_size     = var.node_group_min_size
+  }
+
+  # Use Launch Template to ensure underlying EC2 instances/volumes are tagged
+  launch_template {
+    id      = aws_launch_template.eks_nodes.id
+    version = aws_launch_template.eks_nodes.latest_version
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.eks_container_registry_policy,
+  ]
+
+  tags = {
+    Name = "${var.project_name}-node-group"
+  }
+}
+
+# Launch template to tag underlying EC2 instances and EBS volumes
+resource "aws_launch_template" "eks_nodes" {
+  name_prefix   = "${var.project_name}-eks-ng-"
+  update_default_version = true
+
+  instance_type = var.node_instance_type
+
+  vpc_security_group_ids = [aws_security_group.eks_nodes.id]
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name                = "${var.project_name}-eks-node"
+      cflt_managed_id     = "ggeorge"
+      cflt_managed_by     = "user"
+      cflt_service        = "cip-by-csa"
+      cflt_environment    = "dev"
+      cflt_keep_until     = "2025-12-31"
+    }
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags = {
+      Name                = "${var.project_name}-eks-node-volume"
+      cflt_managed_id     = "ggeorge"
+      cflt_managed_by     = "user"
+      cflt_service        = "cip-by-csa"
+      cflt_environment    = "dev"
+      cflt_keep_until     = "2025-12-31"
+    }
+  }
+
+  tags = {
+    Name = "${var.project_name}-eks-ng-lt"
+  }
+}
+
+# Jumphost EC2 Instance
+resource "aws_instance" "jumphost" {
+  #ami                    = data.aws_ami.amazon_linux.id
+  ami                    = "ami-04c42dcc70346f4f7"
+  instance_type          = var.jumphost_instance_type
+  key_name               = aws_key_pair.main.key_name
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.jumphost.id]
+
+  user_data = base64encode(templatefile("${path.module}/jumphost_user_data.sh", {
+    project_name = var.project_name
+  }))
+
+  tags = {
+    Name = "${var.project_name}-jumphost"
+  }
+}
+
+# Data source for Amazon Linux 2 AMI
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
