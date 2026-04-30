@@ -1,3 +1,8 @@
+output "aws_region" {
+  description = "AWS region where resources are deployed"
+  value       = var.aws_region
+}
+
 output "vpc_id" {
   description = "ID of the VPC"
   value       = aws_vpc.main.id

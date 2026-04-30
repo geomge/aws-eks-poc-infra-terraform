@@ -9,8 +9,8 @@ unzip awscliv2.zip
 ./aws/install
 rm -rf aws awscliv2.zip
 
-# Install kubectl
-curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.28.5/2024-01-04/bin/linux/amd64/kubectl
+# Install kubectl (version matches the EKS cluster)
+curl -LO "https://dl.k8s.io/release/v${kubernetes_version}.0/bin/linux/amd64/kubectl"
 chmod +x ./kubectl
 mv ./kubectl /usr/local/bin/kubectl
 
@@ -39,7 +39,7 @@ This instance is configured with:
 - Helm
 
 To connect to the EKS cluster, run:
-aws eks update-kubeconfig --region us-west-2 --name ${project_name}-eks
+aws eks update-kubeconfig --region ${aws_region} --name ${project_name}-eks
 
 Then you can use kubectl to manage your cluster.
 EOF

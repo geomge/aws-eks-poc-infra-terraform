@@ -1,0 +1,85 @@
+🚀 Recommended setup (stable + background)
+Option 1 — One-liner (quick & solid)
+ssh -fNT \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=60 \
+  -o ServerAliveCountMax=3 \
+  -i /Users/ggeorge/.ssh/csa-gg-ap-south-1-keypair.pem \
+  -L 9443:10.0.10.125:443 \
+  ec2-user@52.66.196.182
+🔍 What each flag does
+-f → run in background after connection
+-N → no remote command
+-T → no terminal
+ServerAliveInterval=60 → keep connection alive
+ServerAliveCountMax=3 → retry before dropping
+ExitOnForwardFailure=yes → fail fast if tunnel fails
+✅ After running
+
+Check:
+
+lsof -i :9443
+
+Test:
+
+curl -vk https://localhost:9443
+
+Then:
+
+kubectl get nodes
+🛡️ Option 2 — Auto-reconnect (best for long-running use)
+
+Install:
+
+brew install autossh
+
+Then run:
+
+autossh -fNT \
+  -M 0 \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -i /Users/ggeorge/.ssh/csa-gg-ap-south-1-keypair.pem \
+  -L 9443:10.0.10.125:443 \
+  ec2-user@52.66.196.182
+💡 Why autossh is better
+Automatically reconnects if tunnel drops
+Ideal for:
+long kubectl sessions
+dashboards
+CI usage
+🧹 Useful commands
+Kill tunnel
+pkill -f "9443:10.0.10.125:443"
+Check if running
+ps aux | grep ssh
+Restart cleanly
+pkill -f 9443
+# then rerun autossh
+⚠️ One important thing (don’t skip)
+
+Since you're tunneling via IP:
+
+👉 You must have this set:
+
+kubectl config set-cluster arn:aws:eks:ap-south-1:492737776546:cluster/csa-gg-eks \
+  --insecure-skip-tls-verify=true
+
+Otherwise TLS hostname mismatch will break kubectl.
+
+🧠 Final architecture
+kubectl
+   ↓
+localhost:9443
+   ↓ (SSH tunnel)
+EC2 (52.66.196.182)
+   ↓
+EKS API (10.0.10.125)
+🎯 Pro tip (optional but clean)
+
+If you don’t like modifying kubeconfig repeatedly, create a separate context like:
+
+kubectl config set-context csa-gg-eks-tunnel \
+  --cluster=arn:aws:eks:ap-south-1:492737776546:cluster/csa-gg-eks \
+  --user=<same-user>

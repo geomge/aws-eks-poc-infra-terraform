@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
   backend "s3" {
     bucket = "csa-gg-bucket"
@@ -127,6 +131,10 @@ resource "aws_route_table_association" "public" {
 resource "aws_eip" "nat" {
   domain = "vpc"
 
+  # Explicit dependency ensures the EIP is fully released before the IGW is detached.
+  # Without this, "terraform destroy" can fail with DependencyViolation ("mapped public address").
+  depends_on = [aws_internet_gateway.main]
+
   tags = {
     Name = "${var.project_name}-nat-eip"
   }
@@ -165,6 +173,19 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
+# EKS control plane creates ENIs in the private subnets that are owned by AWS (not the caller).
+# After cluster deletion AWS cleans them up asynchronously, which takes ~60-90 seconds.
+# Without this delay, "terraform destroy" tries to delete subnets before the ENIs are gone
+# and fails with AuthFailure (the ENIs cannot be removed by the caller's credentials).
+#
+# Dependency chain exploits Terraform's destroy-order inversion:
+#   Create:  subnets → time_sleep → eks_cluster
+#   Destroy: eks_cluster → time_sleep (90s wait) → subnets
+resource "time_sleep" "wait_for_cluster_eni_cleanup" {
+  depends_on       = [aws_subnet.private, aws_subnet.public]
+  destroy_duration = "90s"
+}
+
 # Security Group for Jumphost
 resource "aws_security_group" "jumphost" {
   name_prefix = "${var.project_name}-jumphost-"
@@ -189,7 +210,8 @@ resource "aws_security_group" "jumphost" {
   }
 }
 
-# Security Group for EKS Cluster
+# Security Group for EKS Cluster (control plane ENIs)
+# Cross-referencing rules with eks_nodes are in aws_security_group_rule below to avoid a cycle.
 resource "aws_security_group" "eks_cluster" {
   name_prefix = "${var.project_name}-eks-cluster-"
   vpc_id      = aws_vpc.main.id
@@ -199,14 +221,6 @@ resource "aws_security_group" "eks_cluster" {
     to_port   = 443
     protocol  = "tcp"
     self      = true
-  }
-
-  # Allow API server access from EKS nodes
-  ingress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.eks_nodes.id]
   }
 
   # Allow API server access from jumphost
@@ -230,14 +244,16 @@ resource "aws_security_group" "eks_cluster" {
 }
 
 # Security Group for EKS Nodes
+# Cross-referencing rules with eks_cluster are in aws_security_group_rule below to avoid a cycle.
 resource "aws_security_group" "eks_nodes" {
   name_prefix = "${var.project_name}-eks-nodes-"
   vpc_id      = aws_vpc.main.id
 
+  # All protocols between nodes (TCP, UDP required for VPC CNI, CoreDNS, etc.)
   ingress {
     from_port = 0
-    to_port   = 65535
-    protocol  = "tcp"
+    to_port   = 0
+    protocol  = "-1"
     self      = true
   }
 
@@ -251,6 +267,39 @@ resource "aws_security_group" "eks_nodes" {
   tags = {
     Name = "${var.project_name}-eks-nodes-sg"
   }
+}
+
+# Cross-referencing rules between cluster and node SGs.
+# Defined as standalone resources to break the circular dependency.
+
+resource "aws_security_group_rule" "cluster_ingress_from_nodes" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.eks_cluster.id
+  source_security_group_id = aws_security_group.eks_nodes.id
+  description              = "Nodes to API server (443)"
+}
+
+resource "aws_security_group_rule" "nodes_ingress_kubelet_from_cluster" {
+  type                     = "ingress"
+  from_port                = 10250
+  to_port                  = 10250
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.eks_nodes.id
+  source_security_group_id = aws_security_group.eks_cluster.id
+  description              = "Control plane to kubelet (10250)"
+}
+
+resource "aws_security_group_rule" "nodes_ingress_webhooks_from_cluster" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.eks_nodes.id
+  source_security_group_id = aws_security_group.eks_cluster.id
+  description              = "Control plane to node webhooks (443)"
 }
 
 # EKS Cluster IAM Role
@@ -338,6 +387,7 @@ resource "aws_eks_cluster" "main" {
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy,
+    time_sleep.wait_for_cluster_eni_cleanup,
   ]
 
   tags = {
@@ -382,7 +432,12 @@ resource "aws_launch_template" "eks_nodes" {
 
   instance_type = var.node_instance_type
 
-  vpc_security_group_ids = [aws_security_group.eks_nodes.id]
+  # Include the EKS-managed cluster SG so the control plane can reach nodes.
+  # Without this, EKS does not auto-attach the cluster SG when vpc_security_group_ids is set.
+  vpc_security_group_ids = [
+    aws_security_group.eks_nodes.id,
+    aws_eks_cluster.main.vpc_config[0].cluster_security_group_id,
+  ]
 
   tag_specifications {
     resource_type = "instance"
@@ -422,8 +477,14 @@ resource "aws_instance" "jumphost" {
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.jumphost.id]
 
+  # Ensures the jumphost (and its dynamic public IP) is fully terminated before the IGW
+  # is detached from the VPC, preventing a DependencyViolation on destroy.
+  depends_on = [aws_internet_gateway.main]
+
   user_data = base64encode(templatefile("${path.module}/jumphost_user_data.sh", {
-    project_name = var.project_name
+    project_name       = var.project_name
+    aws_region         = var.aws_region
+    kubernetes_version = var.kubernetes_version
   }))
 
   tags = {
