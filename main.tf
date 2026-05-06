@@ -191,52 +191,15 @@ resource "aws_security_group" "jumphost" {
   name_prefix = "${var.project_name}-jumphost-"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   tags = {
     Name = "${var.project_name}-jumphost-sg"
   }
 }
 
 # Security Group for EKS Cluster (control plane ENIs)
-# Cross-referencing rules with eks_nodes are in aws_security_group_rule below to avoid a cycle.
 resource "aws_security_group" "eks_cluster" {
   name_prefix = "${var.project_name}-eks-cluster-"
   vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port = 443
-    to_port   = 443
-    protocol  = "tcp"
-    self      = true
-  }
-
-  # Allow API server access from jumphost
-  ingress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.jumphost.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   tags = {
     Name = "${var.project_name}-eks-cluster-sg"
@@ -244,34 +207,89 @@ resource "aws_security_group" "eks_cluster" {
 }
 
 # Security Group for EKS Nodes
-# Cross-referencing rules with eks_cluster are in aws_security_group_rule below to avoid a cycle.
 resource "aws_security_group" "eks_nodes" {
   name_prefix = "${var.project_name}-eks-nodes-"
   vpc_id      = aws_vpc.main.id
-
-  # All protocols between nodes (TCP, UDP required for VPC CNI, CoreDNS, etc.)
-  ingress {
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
-    self      = true
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   tags = {
     Name = "${var.project_name}-eks-nodes-sg"
   }
 }
 
-# Cross-referencing rules between cluster and node SGs.
-# Defined as standalone resources to break the circular dependency.
+# All SG rules are managed as standalone aws_security_group_rule resources.
+# Mixing inline ingress/egress blocks with standalone rules causes Terraform state
+# drift where standalone-rule-managed entries appear as phantom inline rules on refresh.
 
+# Jumphost rules
+resource "aws_security_group_rule" "jumphost_ingress_ssh" {
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  security_group_id = aws_security_group.jumphost.id
+  cidr_blocks       = ["0.0.0.0/0"]
+  description       = "SSH from internet"
+}
+
+resource "aws_security_group_rule" "jumphost_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.jumphost.id
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
+# EKS cluster rules
+resource "aws_security_group_rule" "cluster_ingress_self" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  security_group_id = aws_security_group.eks_cluster.id
+  self              = true
+}
+
+resource "aws_security_group_rule" "cluster_ingress_from_jumphost" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.eks_cluster.id
+  source_security_group_id = aws_security_group.jumphost.id
+  description              = "Jumphost to API server (443)"
+}
+
+resource "aws_security_group_rule" "cluster_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.eks_cluster.id
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
+# EKS node rules
+resource "aws_security_group_rule" "nodes_ingress_self" {
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.eks_nodes.id
+  self              = true
+  description       = "All protocols between nodes (VPC CNI, CoreDNS, etc.)"
+}
+
+resource "aws_security_group_rule" "nodes_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.eks_nodes.id
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
+# Cross-referencing rules between cluster and node SGs (separate to avoid cycle).
 resource "aws_security_group_rule" "cluster_ingress_from_nodes" {
   type                     = "ingress"
   from_port                = 443
@@ -372,6 +390,39 @@ resource "aws_iam_role_policy_attachment" "eks_container_registry_policy" {
   role       = aws_iam_role.eks_node_group.name
 }
 
+resource "aws_iam_role_policy_attachment" "eks_ebs_csi_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "aws-ebs-csi-driver"
+
+  # extraVolumeTags are passed as TagSpecifications on every ec2:CreateVolume call
+  # the driver makes. Required because the org SCP denies CreateVolume unless these
+  # tags are present on the request.
+  configuration_values = jsonencode({
+    controller = {
+      extraVolumeTags = {
+        cflt_managed_id   = "ggeorge"
+        cflt_managed_by   = "user"
+        cflt_service      = "cip-by-csa"
+        cflt_environment  = "dev"
+        cflt_keep_until   = "2025-12-31"
+      }
+    }
+  })
+
+  # Wait for node group rolling replacement to complete after launch template changes
+  # before the addon is considered ready. This ensures CSI controller pods land on
+  # nodes that already have the correct IMDS hop limit.
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_ebs_csi_policy,
+    aws_eks_node_group.main,
+  ]
+}
+
 # EKS Cluster
 resource "aws_eks_cluster" "main" {
   name     = "${var.project_name}-eks"
@@ -431,6 +482,14 @@ resource "aws_launch_template" "eks_nodes" {
   update_default_version = true
 
   instance_type = var.node_instance_type
+
+  # Hop limit 2 lets pods reach IMDS (169.254.169.254) through the extra network
+  # namespace hop. Default of 1 causes CSI controller pods to fail credential lookup.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
 
   # Include the EKS-managed cluster SG so the control plane can reach nodes.
   # Without this, EKS does not auto-attach the cluster SG when vpc_security_group_ids is set.

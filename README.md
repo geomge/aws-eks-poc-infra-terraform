@@ -18,9 +18,9 @@ Public Subnet (10.0.1.0/24) — ap-south-1a
 ┌─────────────────────────────────────────────────────┐
 │                 Private VPC (10.0.0.0/16)           │
 │                                                     │
-│  Private Subnet 1 (10.0.10.0/24) — ap-south-1a     │
-│  Private Subnet 2 (10.0.20.0/24) — ap-south-1b     │
-│  Private Subnet 3 (10.0.30.0/24) — ap-south-1c     │
+│  Private Subnet 1 (10.0.10.0/24) — ap-south-1a      │
+│  Private Subnet 2 (10.0.20.0/24) — ap-south-1b      │
+│  Private Subnet 3 (10.0.30.0/24) — ap-south-1c      │
 │                                                     │
 │  EKS Cluster (private endpoint only)                │
 │  EKS Managed Node Group (1 node per subnet)         │
@@ -97,6 +97,12 @@ bash start_tunnel.sh
 
 This resolves the EKS endpoint automatically via `terraform output` and forwards `localhost:9443` to the EKS API.
 
+The script sends SSH keepalives every 30 seconds to prevent NAT/firewall idle timeouts. If `autossh` is installed it will also auto-reconnect on drop:
+
+```bash
+brew install autossh   # once, on your laptop
+```
+
 ### Step 2 — Configure kubectl (one-time after each apply)
 
 ```bash
@@ -123,6 +129,60 @@ kubectl get pods -A
 # Ctrl+C in the tunnel terminal, or:
 pkill -f "9443:"
 ```
+
+## Optional: Default Storage Class for PVCs
+
+EKS does not ship a default storage class with a `Retain` reclaim policy. If your workloads use PersistentVolumeClaims, follow the two steps below.
+
+### What Terraform handles automatically
+
+`terraform apply` already provisions:
+
+- **IAM** — `AmazonEBSCSIDriverPolicy` attached to the node group role
+- **EKS add-on** — `aws-ebs-csi-driver` installed on the cluster
+
+These are required for any EBS-backed PVC to work. EKS 1.23+ migrates all `kubernetes.io/aws-ebs` provisioner requests to `ebs.csi.aws.com` internally, so the CSI driver must be present even if your StorageClass still names the old provisioner.
+
+### What requires a manual kubectl step
+
+The StorageClass itself cannot be managed by Terraform in this setup — the EKS API endpoint is private-only, so `terraform apply` running on your laptop has no path to reach the Kubernetes API (it would require the SSH tunnel to be active during every apply, which is fragile). Apply it once manually instead.
+
+From the jumphost, or from your laptop with the SSH tunnel running:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp2-retain
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+parameters:
+  type: gp2
+  csi.storage.k8s.io/fstype: ext4
+EOF
+```
+
+Key differences from the old in-tree manifest:
+- `provisioner: ebs.csi.aws.com` — explicit CSI driver, no migration indirection
+- `csi.storage.k8s.io/fstype` — CSI-native parameter key (replaces `fsType`)
+
+Verify it is set as default:
+
+```bash
+kubectl get storageclass
+```
+
+`gp2-retain` should show `(default)`. `WaitForFirstConsumer` ensures the EBS volume is created in the same AZ as the pod that claims it.
+
+> If another storage class is already marked default (e.g. the built-in `gp2`), remove its annotation first:
+> ```bash
+> kubectl annotate storageclass gp2 storageclass.kubernetes.io/is-default-class-
+> ```
 
 ## Configuration
 

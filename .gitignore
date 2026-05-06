@@ -27,4 +27,5 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+outputs.txt
 

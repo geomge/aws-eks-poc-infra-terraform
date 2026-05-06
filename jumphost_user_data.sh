@@ -44,6 +44,13 @@ aws eks update-kubeconfig --region ${aws_region} --name ${project_name}-eks
 Then you can use kubectl to manage your cluster.
 EOF
 
+# Keep SSH tunnels alive — prevents NAT/firewall from dropping idle tunnel connections
+cat >> /etc/ssh/sshd_config << 'EOF'
+ClientAliveInterval 30
+ClientAliveCountMax 6
+EOF
+systemctl restart sshd
+
 # Set up bash completion for kubectl
 echo 'source <(kubectl completion bash)' >> /home/ec2-user/.bashrc
 echo 'alias k=kubectl' >> /home/ec2-user/.bashrc
