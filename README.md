@@ -33,7 +33,23 @@ Local kubectl traffic flows: `laptop → SSH tunnel → jumphost → EKS API (pr
 
 - AWS CLI configured (`aws configure`)
 - Terraform >= 1.0
-- IAM permissions: VPC, EC2, EKS, IAM role creation
+- IAM permissions: VPC, EC2, EKS, IAM role creation, S3 (for remote state)
+- An S3 bucket for Terraform remote state. The backend is configured in `main.tf`:
+  ```hcl
+  backend "s3" {
+    bucket = "csa-gg-bucket"
+    key    = "aws-poc-infra/terraform.tfstate"
+    region = "ap-south-1"
+  }
+  ```
+  Create the bucket before running `terraform init`:
+  ```bash
+  aws s3api create-bucket --bucket <your-bucket-name> --region <your-region> \
+    --create-bucket-configuration LocationConstraint=<your-region>
+  ```
+  Then update the `bucket` and `region` values in the `backend "s3"` block in `main.tf` to match.
+
+> **Changing region or project name:** update `aws_region` and `project_name` in `terraform.tfvars`, and update the `bucket` and `region` in the `backend "s3"` block in `main.tf` to match. All resource names and the state file location are derived from these two values.
 
 ## Deploy
 
