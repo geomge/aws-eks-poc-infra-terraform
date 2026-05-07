@@ -293,7 +293,7 @@ aws eks update-kubeconfig --region ap-south-1 --name csa-gg-eks
 - Confirm the key is saved: `ls ~/.ssh/csa-gg-ap-south-1-keypair.pem`
 - Confirm the jumphost is reachable: `terraform output -raw jumphost_public_ip`
 - Re-run `bash get_private_key.sh` if the key file is missing
-- For advanced tunnel options and flag reference see [tunnel_debug.md](tunnel_debug.md)
+- For advanced tunnel options and flag reference see [SSH Tunnel Debug Reference](tunnel_debug.md)
 
 ### Image pull errors on pods
 - Confirm NAT gateway is present: `terraform output nat_gateway_ip` should show an IP
