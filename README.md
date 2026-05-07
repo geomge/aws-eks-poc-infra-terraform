@@ -1,4 +1,4 @@
-# AWS POC Infrastructure
+# AWS EKS POC Infrastructure
 
 Private EKS cluster in `ap-south-1` spread across 3 AZs, with a jumphost for SSH-tunnelled kubectl access from a non-static-IP laptop.
 
