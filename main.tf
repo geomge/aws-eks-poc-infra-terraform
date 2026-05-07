@@ -27,13 +27,7 @@ provider "aws" {
   # Default tags applied to all resources that support them
   # Exceptions: IAM roles, policies, and some data sources don't support default tags
   default_tags {
-    tags = {
-      cflt_managed_id    = "ggeorge"
-      cflt_managed_by    = "user"
-      cflt_service       = "cip-by-csa"
-      cflt_environment   = "dev"
-      cflt_keep_until    = "2025-12-31"
-    }
+    tags = local.org_tags
   }
 }
 
@@ -335,14 +329,7 @@ resource "aws_iam_role" "eks_cluster" {
     Version = "2012-10-17"
   })
 
-  tags = {
-    Name = "${var.project_name}-eks-cluster-role"
-    cflt_managed_id    = "ggeorge"
-    cflt_managed_by    = "user"
-    cflt_service       = "cip-by-csa"
-    cflt_environment   = "dev"
-    cflt_keep_until    = "2025-12-31"
-  }
+  tags = merge({ Name = "${var.project_name}-eks-cluster-role" }, local.org_tags)
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
@@ -365,14 +352,7 @@ resource "aws_iam_role" "eks_node_group" {
     Version = "2012-10-17"
   })
 
-  tags = {
-    Name = "${var.project_name}-eks-node-group-role"
-    cflt_managed_id    = "ggeorge"
-    cflt_managed_by    = "user"
-    cflt_service       = "cip-by-csa"
-    cflt_environment   = "dev"
-    cflt_keep_until    = "2025-12-31"
-  }
+  tags = merge({ Name = "${var.project_name}-eks-node-group-role" }, local.org_tags)
 }
 
 resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
@@ -404,13 +384,7 @@ resource "aws_eks_addon" "ebs_csi_driver" {
   # tags are present on the request.
   configuration_values = jsonencode({
     controller = {
-      extraVolumeTags = {
-        cflt_managed_id   = "ggeorge"
-        cflt_managed_by   = "user"
-        cflt_service      = "cip-by-csa"
-        cflt_environment  = "dev"
-        cflt_keep_until   = "2025-12-31"
-      }
+      extraVolumeTags = local.org_tags
     }
   })
 
@@ -500,26 +474,12 @@ resource "aws_launch_template" "eks_nodes" {
 
   tag_specifications {
     resource_type = "instance"
-    tags = {
-      Name                = "${var.project_name}-eks-node"
-      cflt_managed_id     = "ggeorge"
-      cflt_managed_by     = "user"
-      cflt_service        = "cip-by-csa"
-      cflt_environment    = "dev"
-      cflt_keep_until     = "2025-12-31"
-    }
+    tags          = merge({ Name = "${var.project_name}-eks-node" }, local.org_tags)
   }
 
   tag_specifications {
     resource_type = "volume"
-    tags = {
-      Name                = "${var.project_name}-eks-node-volume"
-      cflt_managed_id     = "ggeorge"
-      cflt_managed_by     = "user"
-      cflt_service        = "cip-by-csa"
-      cflt_environment    = "dev"
-      cflt_keep_until     = "2025-12-31"
-    }
+    tags          = merge({ Name = "${var.project_name}-eks-node-volume" }, local.org_tags)
   }
 
   tags = {
