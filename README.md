@@ -216,6 +216,27 @@ kubectl get storageclass
 
 Key pair name follows the pattern: `{project_name}-{aws_region}-keypair`
 
+### Org tags
+
+All resources are tagged with org-mandated labels. These are centralised in `locals.tf` — edit that one file when any tag key or value changes (e.g. rotating `cflt_keep_until`, changing `cflt_environment`):
+
+```hcl
+locals {
+  org_tags = {
+    cflt_managed_id  = "ggeorge"
+    cflt_managed_by  = "user"
+    cflt_service     = "cip-by-csa"
+    cflt_environment = "dev"
+    cflt_keep_until  = "2026-12-31"
+  }
+}
+```
+
+The tags propagate via three mechanisms — all driven from this one map:
+- `provider default_tags` — applied automatically to every supporting resource
+- Explicit `tags` blocks on IAM roles (which do not inherit `default_tags`)
+- `tag_specifications` on the EC2 launch template and `extraVolumeTags` on the EBS CSI driver (required for `ec2:CreateVolume` to pass the org SCP)
+
 ## Outputs
 
 ```bash
