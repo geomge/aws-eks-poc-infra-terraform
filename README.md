@@ -49,7 +49,44 @@ Local kubectl traffic flows: `laptop → SSH tunnel → jumphost → EKS API (pr
   ```
   Then update the `bucket` and `region` values in the `backend "s3"` block in `main.tf` to match.
 
+## Configuration
+
 > **Changing region or project name:** update `aws_region` and `project_name` in `terraform.tfvars`, and update the `bucket` and `region` in the `backend "s3"` block in `main.tf` to match. All resource names and the state file location are derived from these two values.
+
+| Variable | Description | Default (tfvars) |
+|----------|-------------|-----------------|
+| `aws_region` | AWS region | `ap-south-1` |
+| `project_name` | Prefix for all resource names | `csa-gg` |
+| `vpc_cidr` | VPC CIDR | `10.0.0.0/16` |
+| `kubernetes_version` | EKS Kubernetes version | `1.30` |
+| `node_group_desired_size` | Node count (desired) | `3` |
+| `node_group_min_size` | Node count (min) | `3` |
+| `node_group_max_size` | Node count (max) | `4` |
+| `node_instance_type` | EKS node EC2 type | `t3.medium` |
+| `jumphost_instance_type` | Jumphost EC2 type | `t3.micro` |
+
+Key pair name follows the pattern: `{project_name}-{aws_region}-keypair`
+
+### Org tags
+
+All resources are tagged with org-mandated labels. These are centralised in `locals.tf` — edit that one file when any tag key or value changes (e.g. rotating `cflt_keep_until`, changing `cflt_environment`):
+
+```hcl
+locals {
+  org_tags = {
+    cflt_managed_id  = "ggeorge"
+    cflt_managed_by  = "user"
+    cflt_service     = "cip-by-csa"
+    cflt_environment = "dev"
+    cflt_keep_until  = "2026-12-31"
+  }
+}
+```
+
+The tags propagate via three mechanisms — all driven from this one map:
+- `provider default_tags` — applied automatically to every supporting resource
+- Explicit `tags` blocks on IAM roles (which do not inherit `default_tags`)
+- `tag_specifications` on the EC2 launch template and `extraVolumeTags` on the EBS CSI driver (required for `ec2:CreateVolume` to pass the org SCP)
 
 ## Deploy
 
@@ -82,7 +119,9 @@ terraform output key_pair_name   # shows the key filename
 ls -la ~/.ssh/csa-gg-ap-south-1-keypair.pem
 ```
 
-## Access the Jumphost
+## Accessing the Cluster
+
+### From the jumphost
 
 ```bash
 # Use the exact command from Terraform outputs
@@ -101,11 +140,11 @@ aws eks update-kubeconfig --region ap-south-1 --name csa-gg-eks
 kubectl get nodes
 ```
 
-## Access EKS from Your Laptop (SSH Tunnel)
+### From your laptop (SSH tunnel)
 
 The EKS API endpoint is **private only** (`endpoint_public_access = false`). Kubectl on your laptop requires an SSH tunnel through the jumphost.
 
-### Step 1 — Start the tunnel (keep this terminal open)
+#### Step 1 — Start the tunnel (keep this terminal open)
 
 ```bash
 bash start_tunnel.sh
@@ -119,7 +158,7 @@ The script sends SSH keepalives every 30 seconds to prevent NAT/firewall idle ti
 brew install autossh   # once, on your laptop
 ```
 
-### Step 2 — Configure kubectl (one-time after each apply)
+#### Step 2 — Configure kubectl (one-time after each apply)
 
 ```bash
 # Add the cluster to your kubeconfig
@@ -132,14 +171,14 @@ kubectl config set-cluster "$CLUSTER_ARN" \
   --insecure-skip-tls-verify=true
 ```
 
-### Step 3 — Use kubectl
+#### Step 3 — Use kubectl
 
 ```bash
 kubectl get nodes
 kubectl get pods -A
 ```
 
-### Stop the tunnel
+#### Stop the tunnel
 
 ```bash
 # Ctrl+C in the tunnel terminal, or:
@@ -200,43 +239,6 @@ kubectl get storageclass
 > kubectl annotate storageclass gp2 storageclass.kubernetes.io/is-default-class-
 > ```
 
-## Configuration
-
-| Variable | Description | Default (tfvars) |
-|----------|-------------|-----------------|
-| `aws_region` | AWS region | `ap-south-1` |
-| `project_name` | Prefix for all resource names | `csa-gg` |
-| `vpc_cidr` | VPC CIDR | `10.0.0.0/16` |
-| `kubernetes_version` | EKS Kubernetes version | `1.30` |
-| `node_group_desired_size` | Node count (desired) | `3` |
-| `node_group_min_size` | Node count (min) | `3` |
-| `node_group_max_size` | Node count (max) | `4` |
-| `node_instance_type` | EKS node EC2 type | `t3.medium` |
-| `jumphost_instance_type` | Jumphost EC2 type | `t3.micro` |
-
-Key pair name follows the pattern: `{project_name}-{aws_region}-keypair`
-
-### Org tags
-
-All resources are tagged with org-mandated labels. These are centralised in `locals.tf` — edit that one file when any tag key or value changes (e.g. rotating `cflt_keep_until`, changing `cflt_environment`):
-
-```hcl
-locals {
-  org_tags = {
-    cflt_managed_id  = "ggeorge"
-    cflt_managed_by  = "user"
-    cflt_service     = "cip-by-csa"
-    cflt_environment = "dev"
-    cflt_keep_until  = "2026-12-31"
-  }
-}
-```
-
-The tags propagate via three mechanisms — all driven from this one map:
-- `provider default_tags` — applied automatically to every supporting resource
-- Explicit `tags` blocks on IAM roles (which do not inherit `default_tags`)
-- `tag_specifications` on the EC2 launch template and `extraVolumeTags` on the EBS CSI driver (required for `ec2:CreateVolume` to pass the org SCP)
-
 ## Outputs
 
 ```bash
@@ -284,7 +286,7 @@ aws eks update-kubeconfig --region ap-south-1 --name csa-gg-eks
 - Verify NAT gateway exists: `terraform output nat_gateway_ip`
 
 ### kubectl: connection refused on localhost:9443
-- The tunnel is not running. Run `bash start_tunnel.sh` in a separate terminal
+- The tunnel is not running. Run `bash start_tunnel.sh` in a separate terminal (see "From your laptop" above)
 - Check the tunnel is up: `lsof -i :9443`
 
 ### SSH tunnel fails immediately
