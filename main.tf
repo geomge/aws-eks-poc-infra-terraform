@@ -426,6 +426,7 @@ resource "aws_eks_node_group" "main" {
   node_group_name = "${var.project_name}-nodes"
   node_role_arn   = aws_iam_role.eks_node_group.arn
   subnet_ids      = aws_subnet.private[*].id
+  version         = var.kubernetes_version
 
   scaling_config {
     desired_size = var.node_group_desired_size

@@ -31,7 +31,7 @@ variable "private_subnet_cidrs" {
 variable "kubernetes_version" {
   description = "Kubernetes version for EKS cluster"
   type        = string
-  default     = "1.28"
+  default     = "1.34"
 }
 
 variable "node_group_desired_size" {
