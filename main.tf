@@ -415,6 +415,10 @@ resource "aws_eks_cluster" "main" {
     time_sleep.wait_for_cluster_eni_cleanup,
   ]
 
+  upgrade_policy {
+    support_type = "STANDARD"
+  }
+
   tags = {
     Name = "${var.project_name}-eks"
   }

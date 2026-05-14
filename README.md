@@ -58,7 +58,7 @@ Local kubectl traffic flows: `laptop → SSH tunnel → jumphost → EKS API (pr
 | `aws_region` | AWS region | `ap-south-1` |
 | `project_name` | Prefix for all resource names | `csa-gg` |
 | `vpc_cidr` | VPC CIDR | `10.0.0.0/16` |
-| `kubernetes_version` | EKS Kubernetes version | `1.30` |
+| `kubernetes_version` | EKS Kubernetes version | `1.35` |
 | `node_group_desired_size` | Node count (desired) | `3` |
 | `node_group_min_size` | Node count (min) | `3` |
 | `node_group_max_size` | Node count (max) | `4` |
