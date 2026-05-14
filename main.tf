@@ -375,6 +375,19 @@ resource "aws_iam_role_policy_attachment" "eks_ebs_csi_policy" {
   role       = aws_iam_role.eks_node_group.name
 }
 
+resource "aws_eks_addon" "kube_proxy" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "kube-proxy"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  # addon_version is intentionally omitted — EKS installs the default version for
+  # the cluster's Kubernetes version and advances it automatically on cluster upgrades,
+  # keeping kube-proxy within the supported skew policy without manual version pinning.
+  # To pin, set addon_version = "v<k8s>-eksbuild.<n>" and update it alongside var.kubernetes_version.
+
+  depends_on = [aws_eks_node_group.main]
+}
+
 resource "aws_eks_addon" "ebs_csi_driver" {
   cluster_name = aws_eks_cluster.main.name
   addon_name   = "aws-ebs-csi-driver"
